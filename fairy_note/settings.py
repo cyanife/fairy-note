@@ -27,7 +27,7 @@ TORTOISE_ORM = {
         },
     },
     "apps": {
-        "models": {
+        "fairy_note": {
             "models": ["fairy_note.models", "aerich.models"],
             "default_connection": "default",
         },
@@ -39,7 +39,8 @@ TORTOISE_ORM = {
 # get a string by run
 # openssl rand -hex 32
 JWT_SECRET_KEY: str = config("JWT_SECRET_KEY", cast=str)
-JWT_EXPIRE_SECONDS: int = config("JWT_EXPIRE_SECONDS", cast=int, default=3600)
+JWT_EXPIRE_HOURS: int = config("JWT_EXPIRE_HOURS", cast=int, default=720)
+JWT_ALGORITHM: str = config("JWT_ALGORITHM")
 
 BARRAGE_MESSAGE_TYPE = config("BARRAGE_MESSAGE_TYPE", cast=str, default="chatmsg")
 BARRAGE_TABLE_NAME = config("BARRAGE_TABLE_NAME", cast=str)

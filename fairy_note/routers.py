@@ -1,50 +1,42 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Request
-from fastapi_users import FastAPIUsers
-from fastapi_users.authentication import JWTAuthentication
-from fastapi_users.db import TortoiseUserDatabase
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import UUID4
+from tortoise.contrib.fastapi import HTTPNotFoundError
 from tortoise.query_utils import Q
 from tortoise.transactions import in_transaction
 
-from .models import (
-    DouyuBarrage,
-    DouyuBarrage_Pydantic,
-    User,
-    UserCreate,
-    UserDB,
-    UserModel,
-    UserUpdate,
+from .auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_active_user,
+    get_password_hash,
 )
+from .models import DouyuBarrage, UserModel
 from .schemas import (
     Axis,
+    BarrageList,
     Chart,
     ChartSeries,
     DashBoard,
+    DeleteResult,
+    DouyuBarrage_Schema,
+    Message,
     Ranking,
     RankingSeries,
-    UserRanking,
-)
-from .settings import BARRAGE_TABLE_NAME, JWT_EXPIRE_SECONDS, JWT_SECRET_KEY, ROOM_ID
-
-jwt_authentication = JWTAuthentication(
-    secret=JWT_SECRET_KEY,
-    lifetime_seconds=JWT_EXPIRE_SECONDS,
-    tokenUrl="/auth/jwt/login",
-)
-
-user_db = TortoiseUserDatabase(UserDB, UserModel)
-
-fastapi_users = FastAPIUsers(
-    user_db,
-    [jwt_authentication],
+    Token,
+    TokenPayload,
     User,
     UserCreate,
+    UserRanking,
     UserUpdate,
-    UserDB,
 )
+from .settings import BARRAGE_TABLE_NAME, JWT_EXPIRE_HOURS, JWT_SECRET_KEY, ROOM_ID
+
+# BARRAGES
 
 
 class SortMode(str, Enum):
@@ -57,8 +49,8 @@ def get_barrage_router():
 
     @router.get(
         "/barrages",
-        response_model=List[DouyuBarrage_Pydantic],
-        dependencies=[Depends(fastapi_users.get_current_active_user)],
+        response_model=BarrageList,
+        dependencies=[Depends(get_current_active_user)],
     )
     async def get_barrage(
         request: Request,
@@ -68,6 +60,7 @@ def get_barrage_router():
         dt_max: Optional[datetime] = None,
     ):
         query = Q()
+        order_by = None
         if username:
             query = query & Q(nickname__icontains=username)
         if dt_min:
@@ -75,13 +68,18 @@ def get_barrage_router():
         if dt_max:
             query = query & Q(time__lte=dt_max)
         if sort == SortMode.ASC:
-            return await DouyuBarrage_Pydantic.from_queryset(
-                DouyuBarrage.filter(query).order_by("time")
-            )
+            order_by = "time"
         else:
-            return await DouyuBarrage_Pydantic.from_queryset(
-                DouyuBarrage.filter(query).order_by("-time")
-            )
+            order_by = "-time"
+        barrages = await DouyuBarrage_Schema.from_queryset(
+            DouyuBarrage.filter(query).order_by(order_by).limit(1000)
+        )
+        barrage_list = BarrageList(barrages=barrages)
+        if len(barrages) == 1000:
+            barrage_list.messages = [
+                Message(type="warn", text="符合条件的记录过多，显示最近的1000条弹幕。")
+            ]
+        return barrage_list
 
     return router
 
@@ -188,7 +186,7 @@ def get_dashboard_routers() -> APIRouter:
     @router.get(
         "/dashboard",
         response_model=DashBoard,
-        dependencies=[Depends(fastapi_users.get_current_active_user)],
+        dependencies=[Depends(get_current_active_user)],
     )
     async def get_dashboard_data(request: Request):
         trend_data = await get_trend_data()
@@ -205,27 +203,87 @@ def get_dashboard_routers() -> APIRouter:
 
     return router
 
+    # USER
+
+
+def get_user_routes() -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/users", response_model=List[User])
+    async def get_users():
+        return await User.from_queryset(UserModel.all())
+
+    @router.post("/users", response_model=User)
+    async def create_user(user: UserCreate):
+        user_dict = user.dict(exclude_unset=True)
+        user_dict["hashed_password"] = get_password_hash(user_dict["password"])
+        user_obj = await UserModel.create(**user_dict)
+        return await User.from_tortoise_orm(user_obj)
+
+    @router.get(
+        "/users/{user_id}",
+        response_model=User,
+        responses={404: {"model": HTTPNotFoundError}},
+    )
+    async def get_user(user_id: int):
+        return await User.from_queryset_single(UserModel.get(id=user_id))
+
+    @router.put(
+        "/users/{user_id}",
+        response_model=User,
+        responses={404: {"model": HTTPNotFoundError}},
+    )
+    async def update_user(user_id: int, user: UserUpdate):
+        user_obj = await UserModel.get(id=user_id)
+        update_dict = user.dict(exclude_unset=True)
+        if update_dict["password"]:
+            user_obj.hashed_password = get_password_hash(update_dict.pop("password"))
+        await user_obj.update_from_dict(update_dict).save()
+        return await User.from_tortoise_orm(user_obj)
+
+    @router.delete(
+        "/users/{user_id}",
+        response_model=DeleteResult,
+        responses={404: {"model": HTTPNotFoundError}},
+    )
+    async def delete_user(user_id: int):
+        deleted_count = await UserModel.filter(id=user_id).delete()
+        if not deleted_count:
+            raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+        return DeleteResult(message=f"Deleted user {user_id}")
+
+    return router
+
+
+# AUTH
+
+
+def get_auth_router() -> APIRouter:
+    router = APIRouter()
+
+    @router.post("/token", response_model=Token)
+    async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+        user = await authenticate_user(form_data.username, form_data.password)
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        access_token_expires = timedelta(hours=JWT_EXPIRE_HOURS)
+        access_token = create_access_token(
+            data={"sub": user.username}, expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+
+    return router
+
 
 def init_app(app, **kwargs):
-    app.include_router(
-        fastapi_users.get_auth_router(jwt_authentication),
-        prefix="/auth/jwt",
-        tags=["auth"],
-    )
-    # app.include_router(
-    #     fastapi_users.get_register_router(),
-    #     prefix="/auth",
-    #     tags=["auth"],
-    # )
-    app.include_router(
-        fastapi_users.get_reset_password_router(JWT_SECRET_KEY),
-        prefix="/auth",
-        tags=["auth"],
-    )
-    app.include_router(
-        fastapi_users.get_users_router(), prefix="/users", tags=["users"]
-    )
+
     app.include_router(get_barrage_router(), tags=["barrages"])
     app.include_router(get_dashboard_routers(), tags=["dashboard"])
+    app.include_router(get_user_routes(), tags=["users"])
+    app.include_router(get_auth_router(), tags=["auth"])
 
     # app.include_router(router)

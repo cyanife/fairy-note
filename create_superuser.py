@@ -1,17 +1,19 @@
 import asyncio
 
-from fairy_note.models import UserCreate
-from fairy_note.routers import fastapi_users
+from tortoise import Tortoise
+
+from fairy_note.auth import get_password_hash
+from fairy_note.models import UserModel
+from fairy_note.settings import TORTOISE_ORM
 
 
 async def create_superuser():
-    await fastapi_users.create_user(
-        UserCreate(
-            email="admin@fairynote.live",
-            password="password",
-            is_superuser=True,
-        )
-    )
+    await Tortoise.init(config=TORTOISE_ORM)
+    user = UserModel()
+    user.username = "admin"
+    user.hashed_password = get_password_hash("admin")
+    user.is_active = True
+    await user.save()
 
 
 if __name__ == "__main__":
