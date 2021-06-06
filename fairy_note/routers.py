@@ -34,7 +34,13 @@ from .schemas import (
     UserRanking,
     UserUpdate,
 )
-from .settings import BARRAGE_TABLE_NAME, JWT_EXPIRE_HOURS, JWT_SECRET_KEY, ROOM_ID
+from .settings import (
+    API_PREFIX,
+    BARRAGE_TABLE_NAME,
+    JWT_EXPIRE_HOURS,
+    JWT_SECRET_KEY,
+    ROOM_ID,
+)
 
 # BARRAGES
 
@@ -209,11 +215,19 @@ def get_dashboard_routers() -> APIRouter:
 def get_user_routes() -> APIRouter:
     router = APIRouter()
 
-    @router.get("/users", response_model=List[User])
+    @router.get(
+        "/users",
+        response_model=List[User],
+        dependencies=[Depends(get_current_active_user)],
+    )
     async def get_users():
         return await User.from_queryset(UserModel.all())
 
-    @router.post("/users", response_model=User)
+    @router.post(
+        "/users",
+        response_model=User,
+        dependencies=[Depends(get_current_active_user)],
+    )
     async def create_user(user: UserCreate):
         user_dict = user.dict(exclude_unset=True)
         user_dict["hashed_password"] = get_password_hash(user_dict["password"])
@@ -221,9 +235,18 @@ def get_user_routes() -> APIRouter:
         return await User.from_tortoise_orm(user_obj)
 
     @router.get(
+        "/users/me",
+        response_model=User,
+        dependencies=[Depends(get_current_active_user)],
+    )
+    def get_current_user(current_user: User = Depends(get_current_active_user)):
+        return current_user
+
+    @router.get(
         "/users/{user_id}",
         response_model=User,
         responses={404: {"model": HTTPNotFoundError}},
+        dependencies=[Depends(get_current_active_user)],
     )
     async def get_user(user_id: int):
         return await User.from_queryset_single(UserModel.get(id=user_id))
@@ -232,6 +255,7 @@ def get_user_routes() -> APIRouter:
         "/users/{user_id}",
         response_model=User,
         responses={404: {"model": HTTPNotFoundError}},
+        dependencies=[Depends(get_current_active_user)],
     )
     async def update_user(user_id: int, user: UserUpdate):
         user_obj = await UserModel.get(id=user_id)
@@ -245,6 +269,7 @@ def get_user_routes() -> APIRouter:
         "/users/{user_id}",
         response_model=DeleteResult,
         responses={404: {"model": HTTPNotFoundError}},
+        dependencies=[Depends(get_current_active_user)],
     )
     async def delete_user(user_id: int):
         deleted_count = await UserModel.filter(id=user_id).delete()
@@ -281,9 +306,9 @@ def get_auth_router() -> APIRouter:
 
 def init_app(app, **kwargs):
 
-    app.include_router(get_barrage_router(), tags=["barrages"])
-    app.include_router(get_dashboard_routers(), tags=["dashboard"])
-    app.include_router(get_user_routes(), tags=["users"])
-    app.include_router(get_auth_router(), tags=["auth"])
+    app.include_router(get_barrage_router(), prefix=API_PREFIX, tags=["barrages"])
+    app.include_router(get_dashboard_routers(), prefix=API_PREFIX, tags=["dashboard"])
+    app.include_router(get_user_routes(), prefix=API_PREFIX, tags=["users"])
+    app.include_router(get_auth_router(), prefix=API_PREFIX, tags=["auth"])
 
     # app.include_router(router)

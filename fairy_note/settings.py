@@ -46,3 +46,5 @@ BARRAGE_MESSAGE_TYPE = config("BARRAGE_MESSAGE_TYPE", cast=str, default="chatmsg
 BARRAGE_TABLE_NAME = config("BARRAGE_TABLE_NAME", cast=str)
 
 ROOM_ID = config("ROOM_ID", cast=str)
+
+API_PREFIX = config("API_PREFIX", cast=str, default="/api/v1")
